@@ -1,0 +1,14 @@
+{
+  "name": "playwright-distributed",
+  "version": "1.0.0",
+  "description": "Distributed Playwright performance testing across multiple VMs",
+  "scripts": {
+    "agent": "node agent/agent.js --port=3001 --id=local",
+    "run": "node coordinator/coordinator.js --config=config.local.json",
+    "run:multi": "node coordinator/coordinator.js --config=config.json",
+    "run:inline": "node coordinator/coordinator.js --vms=localhost:3001 --browsers=3 --query=Playwright"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}

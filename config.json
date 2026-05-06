@@ -1,0 +1,28 @@
+{
+  "searchQuery": "Playwright",
+  "targetUrl": "https://www.google.com",
+  "headless": true,
+  "reportFile": "reports/report.json",
+  "timeout": 90000,
+
+  "vms": [
+    {
+      "id": "local-machine",
+      "host": "localhost",
+      "port": 3001,
+      "browsers": 3
+    },
+    {
+      "id": "vm-office-1",
+      "host": "192.168.1.10",
+      "port": 3001,
+      "browsers": 2
+    },
+    {
+      "id": "vm-office-2",
+      "host": "192.168.1.11",
+      "port": 3001,
+      "browsers": 2
+    }
+  ]
+}
