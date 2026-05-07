@@ -1,6 +1,6 @@
 {
   "searchQuery": "Playwright",
-  "targetUrl": "https://www.google.com",
+  "targetUrl": "https://mn4sg3xappl501.ideasstg.int/solutions/",
   "headless": true,
   "reportFile": "reports/local-report.json",
   "timeout": 90000,
@@ -10,7 +10,7 @@
       "id": "local",
       "host": "localhost",
       "port": 3001,
-      "browsers": 5
+      "browsers": 2
     }
   ]
 }

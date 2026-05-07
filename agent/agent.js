@@ -96,10 +96,11 @@ async function runBrowsers(config) {
   } = config;
 
   if (!script) throw new Error('No script source received from coordinator');
-  // Compile the script sent over the wire — module.exports pattern
+  // Compile the script sent over the wire — module.exports pattern.
+  // We expose `require` so helpers like barrier() can use http/https modules.
   const mod = { exports: {} };
   // eslint-disable-next-line no-new-func
-  (new Function('module', 'exports', script))(mod, mod.exports);
+  (new Function('module', 'exports', 'require', script))(mod, mod.exports, require);
   const runScript = mod.exports;
 
   const results = [];

@@ -15,6 +15,7 @@ async function runScript(page, config, result, browserId) {
     browserId
   );
 
+	await barrier(result, 'queryReady', { config, browserId });
   // ── Type in search box ──
   await timed(result, 'typeDelay', async () => {
     const searchSelector = await Promise.race([
@@ -27,6 +28,9 @@ async function runScript(page, config, result, browserId) {
   }, browserId);
 
   // ── Submit search ──
+  // Sync up across all browsers/VMs so the search submit hits Google at the
+  // same moment (fail-open: any laggard past the timeout is left behind).
+  await barrier(result, 'preSearch', { config, browserId });
   await timed(result, 'searchResponse', async () => {
     await page.keyboard.press('Enter');
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 });

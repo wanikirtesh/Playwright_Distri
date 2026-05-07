@@ -31,8 +31,9 @@ if (args.config && fs.existsSync(args.config)) {
 }
 
 // ─── Load script source to send to agents ────────────────────────────────────
-const LIB_SOURCE    = fs.readFileSync(path.join(__dirname, '../automation/lib.js'),       'utf8');
-const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '../automation/runScript.js'), 'utf8');
+const LIB_SOURCE    = fs.readFileSync(path.join(__dirname, '../src/lib.js'),       'utf8');
+//const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '../src/runScript.js'), 'utf8');
+const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '../src/loginScript.js'), 'utf8');
 // Concatenate lib + script so helpers are in scope when the agent compiles them
 const BUNDLED_SCRIPT = `${LIB_SOURCE}\n${SCRIPT_SOURCE}`;
 
@@ -50,6 +51,11 @@ const CONFIG = {
   headless:    args.headless !== 'false' && config.headless !== false,
   reportFile:  args.report || config.reportFile  || `reports/report-${Date.now()}.json`,
   timeout:     parseInt(args.timeout || config.timeout || '60000'),
+
+  // Barrier (rendezvous) server — agents POST /barrier?label=X to sync up
+  barrierHost:    args['barrier-host']    || config.barrierHost    || 'localhost',
+  barrierPort:    parseInt(args['barrier-port']    || config.barrierPort    || '4000'),
+  barrierTimeout: parseInt(args['barrier-timeout'] || config.barrierTimeout || '10000'),
 };
 
 const log  = (msg) => console.log(`\x1b[36m[COORDINATOR]\x1b[0m ${msg}`);
@@ -98,6 +104,117 @@ function httpGet(host, port, pathname, timeout = 5000) {
   });
 }
 
+// ─── Barrier (rendezvous) server ─────────────────────────────────────────────
+// Agents POST /barrier with { label, timeoutMs?, browserId? }. The server
+// blocks the response until either:
+//   - `expected` browsers have arrived for this label  (full quorum), or
+//   - the per-label deadline elapses                    (fail-open timeout).
+// All currently-pending requests are then released together with the same
+// `releaseAt` epoch (millisecond-aligned). Late arrivals (after release) get
+// an immediate response with `late: true` so they proceed without blocking.
+let BARRIER_EXPECTED = 0;
+const barrierState = new Map(); // label -> state
+
+function ensureBarrier(label, expected, timeoutMs) {
+  let s = barrierState.get(label);
+  if (!s) {
+    s = {
+      label,
+      arrivals: 0,
+      expected,
+      pending: [],
+      deadlineAt: null,
+      released: false,
+      releaseAt: null,
+      timer: null,
+      timedOut: false,
+    };
+    barrierState.set(label, s);
+  }
+  if (expected > s.expected) s.expected = expected;
+  if (!s.deadlineAt) {
+    s.deadlineAt = Date.now() + timeoutMs;
+    s.timer = setTimeout(() => releaseBarrier(label, true), timeoutMs);
+  }
+  return s;
+}
+
+function respondBarrier(res, s, browserId, late) {
+  const body = JSON.stringify({
+    label:     s.label,
+    arrivals:  s.arrivals,
+    expected:  s.expected,
+    timedOut:  s.timedOut,
+    late,
+    releaseAt: s.releaseAt,
+    browserId,
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(body);
+}
+
+function releaseBarrier(label, timedOut = false) {
+  const s = barrierState.get(label);
+  if (!s || s.released) return;
+  s.released  = true;
+  s.timedOut  = timedOut;
+  s.releaseAt = Date.now() + 50; // small grace so all clients see a future timestamp
+  if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+  log(`barrier "${label}" ${timedOut ? 'TIMED OUT' : 'released'} — ${s.arrivals}/${s.expected} arrived`);
+  s.pending.forEach(({ res, browserId }) => respondBarrier(res, s, browserId, false));
+  s.pending = [];
+}
+
+const barrierServer = http.createServer((req, res) => {
+  // CORS / preflight
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (req.method !== 'POST' || !req.url.startsWith('/barrier')) {
+    res.writeHead(404); res.end(); return;
+  }
+  let body = '';
+  req.on('data', c => body += c);
+  req.on('end', () => {
+    let payload;
+    try { payload = JSON.parse(body || '{}'); } catch { payload = {}; }
+    const label     = payload.label || 'default';
+    const browserId = payload.browserId || '?';
+    const timeoutMs = Math.max(100, payload.timeoutMs || CONFIG.barrierTimeout);
+
+    const s = ensureBarrier(label, BARRIER_EXPECTED, timeoutMs);
+    if (s.released) {
+      // Late arrival — proceed immediately, run is already moving on
+      respondBarrier(res, s, browserId, true);
+      return;
+    }
+    s.arrivals++;
+    s.pending.push({ res, browserId });
+    // Drop the connection cleanly if the client gives up (don't leak resolvers)
+    res.on('close', () => {
+      if (!s.released) {
+        s.pending = s.pending.filter(p => p.res !== res);
+      }
+    });
+    if (s.arrivals >= s.expected) releaseBarrier(label, false);
+  });
+  req.on('error', () => { try { res.writeHead(500); res.end(); } catch {} });
+});
+
+function startBarrierServer() {
+  return new Promise((resolve, reject) => {
+    barrierServer.once('error', reject);
+    barrierServer.listen(CONFIG.barrierPort, () => {
+      log(`Barrier server listening on http://${CONFIG.barrierHost}:${CONFIG.barrierPort}/barrier  (expected=${BARRIER_EXPECTED}, timeout=${CONFIG.barrierTimeout}ms)`);
+      resolve();
+    });
+  });
+}
+function stopBarrierServer() {
+  // Force-release any still-pending barriers so this never hangs shutdown
+  for (const label of barrierState.keys()) releaseBarrier(label, true);
+  return new Promise(resolve => barrierServer.close(() => resolve()));
+}
+
 // ─── Health check all VMs ─────────────────────────────────────────────────────
 async function checkVMs() {
   log(`Checking connectivity to ${CONFIG.vms.length} VM(s)...`);
@@ -140,7 +257,9 @@ async function runOnAllVMs(reachableVMs) {
           searchQuery: CONFIG.searchQuery,
           targetUrl: CONFIG.targetUrl,
           headless: CONFIG.headless,
-          script: BUNDLED_SCRIPT
+          script: BUNDLED_SCRIPT,
+          barrierUrl:     `http://${CONFIG.barrierHost}:${CONFIG.barrierPort}/barrier`,
+          barrierTimeout: CONFIG.barrierTimeout
         },
         CONFIG.timeout
       );
@@ -446,9 +565,16 @@ async function main() {
     process.exit(1);
   }
 
+  // Step 1b: Start barrier server (expected = total browsers across reachable VMs)
+  BARRIER_EXPECTED = reachable.reduce((sum, vm) => sum + (vm.browsers || 0), 0);
+  await startBarrierServer();
+
   // Step 2: Run tests
   const { vmResults, totalDuration } = await runOnAllVMs(reachable);
   log(`All VMs completed in ${totalDuration}ms`);
+
+  // Step 2b: Stop barrier server
+  await stopBarrierServer();
 
   // Step 3: Aggregate
   const report = aggregateResults(vmResults, unreachable, totalDuration);
