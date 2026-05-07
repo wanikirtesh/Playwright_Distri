@@ -63,8 +63,8 @@ the same command for first install and for every subsequent code update.
 
 **First run on a fresh Linux VM:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<user>/<repo>/main/scripts/setup-agent.sh -o setup-agent.sh
-REPO_URL=https://github.com/<user>/<repo>.git \
+curl -fsSL https://raw.githubusercontent.com/wanikirtesh/Playwright_Distri/main/scripts/setup-agent.sh -o setup-agent.sh
+REPO_URL=https://github.com/wanikirtesh/Playwright_Distri.git \
 AGENT_PORT=3001 AGENT_ID=vm-office-1 \
 bash setup-agent.sh
 ```
