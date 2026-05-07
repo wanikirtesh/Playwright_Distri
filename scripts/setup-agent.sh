@@ -93,6 +93,15 @@ log "Node $(node -v), npm $(npm -v)"
 
 # ─── 4. Clone or update repo ─────────────────────────────────────────────────
 if [[ ! -d "$APP_DIR/.git" ]]; then
+  if [[ -d "$APP_DIR" ]] && [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]]; then
+    if [[ -z "$REPO_URL" ]]; then
+      echo "ERROR: APP_DIR exists and is not a git repo; REPO_URL is required to recover." >&2
+      exit 1
+    fi
+    BACKUP_DIR="${APP_DIR}.backup.$(date +%Y%m%d-%H%M%S)"
+    log "APP_DIR exists but is not a git repo. Backing it up to $BACKUP_DIR"
+    mv "$APP_DIR" "$BACKUP_DIR"
+  fi
   log "Cloning $REPO_URL into $APP_DIR..."
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 else
