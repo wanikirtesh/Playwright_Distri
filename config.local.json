@@ -1,9 +1,11 @@
 {
   "searchQuery": "Playwright",
-  "targetUrl": "https://mn4sg3xappl501.ideasstg.int/solutions/",
-  "headless": true,
+  "targetUrl": "http://mn4sg3xappl501.ideasstg.int/solutions/",
+  "headless": false,
+  "ignoreHTTPSErrors": true,
   "reportFile": "reports/local-report.json",
-  "timeout": 90000,
+  "timeout": 300000,
+  "iterations": 1,
 
   "vms": [
     {

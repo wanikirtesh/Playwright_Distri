@@ -91,6 +91,7 @@ async function runBrowsers(config) {
     searchQuery = 'Playwright',
     targetUrl = 'https://www.google.com',
     headless = false,
+    ignoreHTTPSErrors = true,
     reportBackUrl = null,
     script = null
   } = config;
@@ -108,7 +109,7 @@ async function runBrowsers(config) {
   const browserInstances = await Promise.all(
     Array.from({ length: browsers }, async (_, i) => {
       const browserId = `${AGENT_ID}-browser-${i + 1}`;
-      log(`Launching browser ${i + 1}/${browsers} [${browserId}]`);
+      log(`Launching browser ${i + 1}/${browsers} [${browserId}] in headless=${headless} mode...`);
 
       const result = {
         browserId,
@@ -121,13 +122,16 @@ async function runBrowsers(config) {
 
       try {
         const _chromiumPath = process.env.CHROMIUM_PATH || '/home/claude/.cache/puppeteer/chrome-headless-shell/linux-131.0.6778.204/chrome-headless-shell-linux64/chrome-headless-shell';
-        const _launchOpts = { headless: false };
-        try { require('fs').accessSync(_chromiumPath); _launchOpts.executablePath = _chromiumPath; } catch(e) {}
+        const _launchOpts = { 
+          headless:headless,
+        };
+        try { require('fs').accessSync(_chromiumPath); _launchOpts.executablePath = _chromiumPath; } catch (e) {}
         const browser = await chromium.launch(_launchOpts);
         activeBrowsers.push(browser);
 
         const context = await browser.newContext({
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+          ignoreHTTPSErrors
         });
 
 

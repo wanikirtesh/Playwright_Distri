@@ -1,3 +1,10 @@
+
+const bData = { 
+  "my-machine-browser-1": {"viewId":"9298", "properties":30},
+  "my-machine-browser-2": {"viewId":"13918","properties":30},
+  "my-machine-browser-3": {"viewId":"13919","properties":30},
+  "my-machine-browser-4": {"viewId":"13920","properties":30},
+  "my-machine-browser-5": {"viewId":"13921","properties":30} };
 async function runScript(page, config, result, browserId) {
   const {
     targetUrl = 'https://mn4sg3xappl501.ideasstg.int/solutions',
@@ -6,6 +13,16 @@ async function runScript(page, config, result, browserId) {
   } = config;
 
   result.timings = result.timings || {};
+  const tokenSelector = '#propertySelectorTokenField .v-button-link';
+  const tokenWaitTimeoutMs = Number(config.propertyTokenTimeoutMs || 30000);
+
+  const waitForTokenIncrease = async (minCount, timeoutMs) => {
+    await page.waitForFunction(
+      ({ sel, previousCount }) => document.querySelectorAll(sel).length > previousCount,
+      { sel: tokenSelector, previousCount: minCount },
+      { timeout: timeoutMs }
+    );
+  };
 
   // Hook network telemetry — must be installed before navigation
   trackNetwork(page, result);
@@ -80,21 +97,85 @@ async function runScript(page, config, result, browserId) {
   await barrier(result, 'preGroupNavigation', { config, browserId });
 
   await timed(result, 'GroupPricingLandingPage', async () => {
-    await page.goto(`${targetUrl}/group-pricing-evaluation#/p30001`,  { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(`${targetUrl}/group-pricing-evaluation#/pg${bData[browserId].viewId}`,  { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
   }, browserId);
+
+  // Verify title without expect() — use waitForFunction instead
+  const titleMatches = await page.evaluate(() => /IDeaS G3 - Group Pricing/i.test(document.title));
+  if (!titleMatches) console.warn('[SCRIPT] Warning: page title does not match expected pattern');
+  
+  await page.getByRole('button', { name: 'New Evaluation' }).waitFor({ state: 'visible', timeout: 30_000 });
+
+  // 4. Click the 'New Evaluation' button to open the overlay
+  await page.getByRole('button', { name: 'New Evaluation' }).click();
+  // Wait for the dialog (rendered into v-overlay-container) to appear.
+  await page.locator('#propertySelectorTokenField').waitFor({ state: 'visible' });
+
+  for (let i = 0; i < bData[browserId].properties; i++) {
+      const propInput = page.locator('#propertySelectorTokenField input.v-filterselect-input');
+      await propInput.waitFor({ state: 'visible' });
+      const beforeCount = await page.locator(tokenSelector).count();
+      await propInput.click();
+      await propInput.press(`P`,{ delay: 80 });
+      const popupItems = page.locator('.v-filterselect-suggestpopup td.gwt-MenuItem');
+      // The first row is a blank placeholder; the first real option is at index 1.
+      await popupItems.nth(1).waitFor({ state: 'visible' });
+      await popupItems.nth(1).click();
+      // Wait for Vaadin roundtrip to materialize a new token; retry with another option if needed.
+      try {
+        await waitForTokenIncrease(beforeCount, tokenWaitTimeoutMs);
+      } catch {
+        const fallbackIndex = 2;
+        await propInput.click();
+        await propInput.press(`P`, { delay: 80 });
+        await popupItems.nth(fallbackIndex).waitFor({ state: 'visible', timeout: 5000 });
+        await popupItems.nth(fallbackIndex).click();
+        await waitForTokenIncrease(beforeCount, tokenWaitTimeoutMs);
+      }
+    }
+
+    const groupName = `AutoEval-${Date.now()}`;
+    await page.locator('#groupNameField').fill(groupName);
+   
+    // 7. Open Market Segment dropdown and select the first option
+    await page.locator('#marketSegmentField input').click();
+    const marketItems = page.locator('.v-filterselect-suggestpopup td.gwt-MenuItem');
+    await marketItems.first().waitFor({ state: 'visible' });
+    await marketItems.first().click();
+
+    const day30 = page.locator('.v-window td:not(.date-out-of-range) .v-calendar-month-day', {
+      has: page.locator('.v-calendar-day-number', { hasText: /^30$/ })
+    }).first();
+    await day30.click();
+
+    const roomsField = page.locator('#roomsField');
+    await roomsField.click();
+    await page.keyboard.press('5');
+    await page.keyboard.press('Enter');
+    await barrier(result, 'groupEvaluation', { config, browserId });
+
+  await timed(result, 'GroupEvaluation', async () => {
+      await page.locator('#detailsSaveButton').click();
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+      await Promise.race([
+       page.locator('.functionspace-result').waitFor({ state: 'attached', timeout: 300_000 }),
+       page.locator('.v-Notification-error').waitFor({ state: 'attached', timeout: 300_000 }),
+      ]);
+    }, browserId);
+   
 
  
   result.groupPricingUrl = page.url();
   result.groupPricingTitle = await page.title().catch(() => 'N/A');
   const onGroupPricing = /group[-_ ]?pricing/i.test(result.groupPricingUrl)
-    || await page.locator('text=/Group Pricing/i').first().isVisible().catch(() => false);
+    || await page.locator('.functionspace-result').first().isVisible().catch(() => false);
   setMetric(result, 'groupPricingReached', onGroupPricing ? 1 : 0);
 
   sumTimings(
     result,
-    ['navigation', 'loginFormReady', 'typeUsername', 'typePassword', 'loginResponse', 'postLoginRendered', 'GroupPricingLandingPage'],
+    ['navigation', 'loginFormReady', 'typeUsername', 'typePassword', 'loginResponse', 'postLoginRendered', 'GroupPricingLandingPage','GroupEvaluation'],
     'totalTime'
   );
 }

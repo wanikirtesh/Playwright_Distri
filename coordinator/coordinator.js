@@ -49,13 +49,15 @@ const CONFIG = {
   searchQuery: args.query || config.searchQuery || 'Playwright',
   targetUrl:   args.url   || config.targetUrl   || 'https://www.google.com',
   headless:    args.headless !== 'false' && config.headless !== false,
+  ignoreHTTPSErrors: args.ignoreHTTPSErrors !== 'false' && config.ignoreHTTPSErrors !== false,
   reportFile:  args.report || config.reportFile  || `reports/report-${Date.now()}.json`,
   timeout:     parseInt(args.timeout || config.timeout || '60000'),
+  iterations:  parseInt(args.iterations || config.iterations || '1'),
 
   // Barrier (rendezvous) server — agents POST /barrier?label=X to sync up
   barrierHost:    args['barrier-host']    || config.barrierHost    || 'localhost',
   barrierPort:    parseInt(args['barrier-port']    || config.barrierPort    || '4000'),
-  barrierTimeout: parseInt(args['barrier-timeout'] || config.barrierTimeout || '10000'),
+  barrierTimeout: parseInt(args['barrier-timeout'] || config.barrierTimeout || '90000'),
 };
 
 const log  = (msg) => console.log(`\x1b[36m[COORDINATOR]\x1b[0m ${msg}`);
@@ -84,7 +86,10 @@ function httpPost(host, port, pathname, body, timeout = 60000) {
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error(`Timeout connecting to ${host}:${port}`)); });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Timeout waiting for ${host}:${port}${pathname} response after ${timeout}ms`));
+    });
     req.write(data);
     req.end();
   });
@@ -257,6 +262,7 @@ async function runOnAllVMs(reachableVMs) {
           searchQuery: CONFIG.searchQuery,
           targetUrl: CONFIG.targetUrl,
           headless: CONFIG.headless,
+          ignoreHTTPSErrors: CONFIG.ignoreHTTPSErrors,
           script: BUNDLED_SCRIPT,
           barrierUrl:     `http://${CONFIG.barrierHost}:${CONFIG.barrierPort}/barrier`,
           barrierTimeout: CONFIG.barrierTimeout
@@ -550,13 +556,81 @@ function printReport(report) {
     }
   });
 
+  // ── Cumulative iteration summary table (only when N > 1) ──────────────────
+  if (report.iterationReports && report.iterationReports.length > 1) {
+    const iters = report.iterationReports;
+    const totalKey = timingKeys.includes('totalTime') ? 'totalTime' : timingKeys[timingKeys.length - 1];
+
+    console.log('\n  CUMULATIVE ITERATION SUMMARY\n');
+    const hdr = ['Iter', 'OK/Total', 'Success%', 'AvgTotal', 'Min', 'Max', 'P95', 'Duration'];
+    console.log('  ' + hdr.map((h, i) => i === 0 ? h.padEnd(6) : h.padStart(10)).join(''));
+    console.log('  ' + '─'.repeat(86));
+
+    let cumOk = 0, cumTotal = 0;
+    iters.forEach((ir, idx) => {
+      const s = ir.summary;
+      const t = totalKey && ir.timings[totalKey];
+      cumOk    += s.successfulBrowsers;
+      cumTotal += s.totalBrowsers;
+      const cumRate = cumTotal ? (cumOk / cumTotal * 100).toFixed(1) : '0.0';
+      const row = [
+        String(idx + 1).padEnd(6),
+        (`${s.successfulBrowsers}/${s.totalBrowsers}`).padStart(10),
+        (`${s.successRate}%`).padStart(10),
+        (t ? `${t.avg}ms` : '—').padStart(10),
+        (t ? `${t.min === Infinity ? '-' : t.min + 'ms'}` : '—').padStart(10),
+        (t ? `${t.max}ms` : '—').padStart(10),
+        (t ? `${t.p95}ms` : '—').padStart(10),
+        (`${s.durationSec}s`).padStart(10),
+      ];
+      console.log('  ' + row.join(''));
+    });
+
+    // Cumulative totals row
+    const totalKey2 = timingKeys.includes('totalTime') ? 'totalTime' : timingKeys[timingKeys.length - 1];
+    const allAvg = totalKey2 ? timings[totalKey2]?.avg : 0;
+    const allMin = totalKey2 ? (timings[totalKey2]?.min === Infinity ? '-' : timings[totalKey2]?.min) : '—';
+    const allMax = totalKey2 ? timings[totalKey2]?.max : '—';
+    const allP95 = totalKey2 ? timings[totalKey2]?.p95 : '—';
+    const cumRate = cumTotal ? (cumOk / cumTotal * 100).toFixed(1) : '0.0';
+    console.log('  ' + '─'.repeat(86));
+    console.log('\x1b[1m  ' + [
+      'ALL'.padEnd(6),
+      (`${cumOk}/${cumTotal}`).padStart(10),
+      (`${cumRate}%`).padStart(10),
+      (`${allAvg}ms`).padStart(10),
+      (String(allMin) + 'ms').padStart(10),
+      (`${allMax}ms`).padStart(10),
+      (`${allP95}ms`).padStart(10),
+      (`${(report.totalDuration/1000).toFixed(2)}s`).padStart(10),
+    ].join('') + '\x1b[0m');
+  }
+
   console.log('\n' + '═'.repeat(60) + '\n');
+}
+
+// ─── Single iteration runner ─────────────────────────────────────────────────
+async function runIteration(reachable, unreachable, iterNum) {
+  log(`\n── Iteration ${iterNum}/${CONFIG.iterations} ──────────────────────────────────────────`);
+
+  // Reset barrier state so each iteration gets a fresh rendezvous
+  barrierState.clear();
+  BARRIER_EXPECTED = reachable.reduce((sum, vm) => sum + (vm.browsers || 0), 0);
+
+  const { vmResults, totalDuration } = await runOnAllVMs(reachable);
+  log(`Iteration ${iterNum} completed in ${totalDuration}ms`);
+
+  const report = aggregateResults(vmResults, unreachable, totalDuration);
+  report.totalDuration = totalDuration;
+  report.iteration = iterNum;
+  return report;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log('\n\x1b[1m PLAYWRIGHT DISTRIBUTED PERFORMANCE COORDINATOR\x1b[0m\n');
   log(`VMs configured: ${CONFIG.vms.map(v => `${v.id}(${v.host}:${v.port} x${v.browsers})`).join(', ')}`);
+  log(`Iterations: ${CONFIG.iterations}`);
 
   // Step 1: Health check
   const { reachable, unreachable } = await checkVMs();
@@ -565,33 +639,71 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 1b: Start barrier server (expected = total browsers across reachable VMs)
+  // Step 1b: Start barrier server (stays up for all iterations)
   BARRIER_EXPECTED = reachable.reduce((sum, vm) => sum + (vm.browsers || 0), 0);
   await startBarrierServer();
 
-  // Step 2: Run tests
-  const { vmResults, totalDuration } = await runOnAllVMs(reachable);
-  log(`All VMs completed in ${totalDuration}ms`);
+  // Step 2: Run N iterations sequentially
+  const iterationReports = [];
+  const overallStart = Date.now();
+
+  for (let i = 1; i <= CONFIG.iterations; i++) {
+    const iterReport = await runIteration(reachable, unreachable, i);
+    iterationReports.push(iterReport);
+
+    // Print a compact per-iteration summary
+    const s = iterReport.summary;
+    const totalKey = iterReport.timingKeys.includes('totalTime') ? 'totalTime' : iterReport.timingKeys[iterReport.timingKeys.length - 1];
+    const avgTotal = totalKey ? iterReport.timings[totalKey]?.avg : 0;
+    log(`  Iteration ${i}: ${s.successfulBrowsers}/${s.totalBrowsers} ok | avg total: ${avgTotal}ms | duration: ${s.durationSec}s`);
+  }
 
   // Step 2b: Stop barrier server
   await stopBarrierServer();
 
-  // Step 3: Aggregate
-  const report = aggregateResults(vmResults, unreachable, totalDuration);
-  report.totalDuration = totalDuration;
+  const overallDuration = Date.now() - overallStart;
 
-  // Step 4: Print
-  printReport(report);
+  // Step 3: Merge all iterations into one combined report
+  const allBrowserResults = iterationReports.flatMap((r, idx) =>
+    r.browserResults.map(b => ({ ...b, iteration: idx + 1 }))
+  );
+
+  // Re-aggregate across all iterations with one entry per reachable VM.
+  // This keeps summary.totalVMs stable instead of multiplying by iteration count.
+  const combinedVmResults = reachable.map(vm => ({
+    status: 'fulfilled',
+    value: {
+      vm,
+      response: {
+        results: allBrowserResults.filter(b => b.vmId === vm.id),
+      },
+    },
+  }));
+
+  const combinedReport = aggregateResults(
+    combinedVmResults,
+    unreachable,
+    overallDuration
+  );
+  combinedReport.totalDuration = overallDuration;
+  combinedReport.iterations = CONFIG.iterations;
+  combinedReport.iterationReports = iterationReports;
+  // Override browserResults to include iteration tag
+  combinedReport.browserResults = allBrowserResults;
+
+  // Step 4: Print combined report
+  console.log(`\n\x1b[1m COMBINED REPORT — ${CONFIG.iterations} iteration(s) | ${overallDuration}ms total\x1b[0m`);
+  printReport(combinedReport);
 
   // Step 5: Save JSON report
   const reportPath = CONFIG.reportFile;
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  fs.writeFileSync(reportPath, JSON.stringify(combinedReport, null, 2));
   ok(`Report saved: ${reportPath}`);
 
   // Step 6: Save HTML report
   const htmlPath = reportPath.replace('.json', '.html');
-  fs.writeFileSync(htmlPath, generateHTML(report));
+  fs.writeFileSync(htmlPath, generateHTML(combinedReport));
   ok(`HTML report: ${htmlPath}`);
 }
 
@@ -610,6 +722,7 @@ function generateHTML(report) {
         <th class="browser-col ${r.status}">
           <div class="bh-id">${r.browserId}</div>
           <div class="bh-vm">${r.vmId}</div>
+          ${r.iteration != null ? `<div class="bh-iter">iter ${r.iteration}</div>` : ''}
           <div class="bh-status"><span class="badge ${r.status}">${r.status}</span></div>
         </th>`).join('');
 
@@ -756,7 +869,13 @@ function generateHTML(report) {
   .metric-agg   { color: var(--muted); font-size: 0.65rem; margin-top: 2px; text-transform: none; letter-spacing: 0; }
   .browser-col .bh-id     { color: var(--text); font-size: 0.75rem; font-weight: 700; text-transform: none; letter-spacing: 0; }
   .browser-col .bh-vm     { color: var(--muted); font-size: 0.65rem; margin-top: 2px; }
+  .browser-col .bh-iter   { color: var(--accent2); font-size: 0.62rem; margin-top: 2px; font-weight: 700; }
   .browser-col .bh-status { margin-top: 4px; }
+  .iter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; }
+  .iter-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  .iter-card-title { font-size: 0.65rem; font-family: var(--font-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 0.5rem; }
+  .iter-card-val { font-size: 1.5rem; font-weight: 800; font-family: var(--font-mono); color: var(--accent); line-height: 1; }
+  .iter-card-sub { font-size: 0.7rem; color: var(--muted); margin-top: 4px; font-family: var(--font-mono); }
   .results-table tr.total-row td,
   .results-table tr.total-row th.metric-col { background: var(--surface2); }
   .results-table tr.total-row td strong { color: var(--accent); }
@@ -857,6 +976,59 @@ function generateHTML(report) {
       }).join('')}
     </div>
   </section>` : ''}
+
+  ${report.iterationReports && report.iterationReports.length > 1 ? (() => {
+    const iters = report.iterationReports;
+    const totalKey = timingKeys.includes('totalTime') ? 'totalTime' : timingKeys[timingKeys.length - 1];
+    let cumOk = 0, cumTotal = 0;
+    const rows = iters.map((ir, idx) => {
+      const s = ir.summary;
+      const t = totalKey && ir.timings[totalKey];
+      cumOk    += s.successfulBrowsers;
+      cumTotal += s.totalBrowsers;
+      const cumRate = cumTotal ? (cumOk / cumTotal * 100).toFixed(1) : '0.0';
+      const color = s.successRate >= 95 ? 'success' : s.successRate >= 80 ? 'warn' : 'error';
+      return `<tr>
+        <td><strong>${idx + 1}</strong></td>
+        <td style="color:var(--${color})">${s.successfulBrowsers}/${s.totalBrowsers}</td>
+        <td style="color:var(--${color})">${s.successRate}%</td>
+        <td>${t ? t.avg + 'ms' : '—'}</td>
+        <td>${t ? (t.min === Infinity ? '—' : t.min + 'ms') : '—'}</td>
+        <td>${t ? t.max + 'ms' : '—'}</td>
+        <td>${t ? t.p95 + 'ms' : '—'}</td>
+        <td style="color:var(--muted)">${cumOk}/${cumTotal} (${cumRate}%)</td>
+        <td>${s.durationSec}s</td>
+      </tr>`;
+    });
+    const allT  = totalKey ? timings[totalKey] : null;
+    const allColor = summary.successRate >= 95 ? 'success' : summary.successRate >= 80 ? 'warn' : 'error';
+    rows.push(`<tr style="font-weight:700;background:var(--surface2)">
+      <td>ALL</td>
+      <td style="color:var(--${allColor})">${summary.successfulBrowsers}/${summary.totalBrowsers}</td>
+      <td style="color:var(--${allColor})">${summary.successRate}%</td>
+      <td style="color:var(--accent)">${allT ? allT.avg + 'ms' : '—'}</td>
+      <td>${allT ? (allT.min === Infinity ? '—' : allT.min + 'ms') : '—'}</td>
+      <td>${allT ? allT.max + 'ms' : '—'}</td>
+      <td>${allT ? allT.p95 + 'ms' : '—'}</td>
+      <td style="color:var(--muted)">—</td>
+      <td>${(report.totalDuration / 1000).toFixed(2)}s</td>
+    </tr>`);
+    return `
+  <section>
+    <h2>Cumulative Iteration Summary</h2>
+    <div class="table-wrap">
+      <table class="results-table" style="font-size:0.82rem">
+        <thead><tr>
+          <th class="metric-col" style="min-width:60px">Iter</th>
+          <th>OK / Total</th><th>Success %</th>
+          <th>Avg Total</th><th>Min</th><th>Max</th><th>P95</th>
+          <th>Cumulative OK</th><th>Duration</th>
+        </tr></thead>
+        <tbody>${rows.join('')}</tbody>
+      </table>
+    </div>
+  </section>`;
+  })() : ''}
 
   <section>
     <h2>VM Summaries</h2>
