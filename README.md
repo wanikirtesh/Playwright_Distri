@@ -74,6 +74,13 @@ bash setup-agent.sh
 bash ~/playwright_distri/scripts/setup-agent.sh
 ```
 
+**Keep the script attached (wait instead of exiting):**
+```bash
+WAIT_MODE=logs bash ~/playwright_distri/scripts/setup-agent.sh
+# or: WAIT_MODE=journal ...   (follow systemd journal)
+# or: WAIT_MODE=wait ...      (block while service stays active)
+```
+
 What the script does (each step is idempotent):
 
 1. Installs `git` and Node.js (LTS `20`) via `apt` / `dnf` / `yum` if missing.
@@ -98,6 +105,7 @@ What the script does (each step is idempotent):
 | `AGENT_ID`     | `$(hostname)`            | Friendly id reported to the coordinator      |
 | `NODE_MAJOR`   | `20`                     | Required Node.js major version               |
 | `SERVICE_NAME` | `playwright-agent`       | systemd unit name                            |
+| `WAIT_MODE`    | `exit`                   | Post-health behavior: `exit`, `logs`, `journal`, `wait` |
 
 **Service operations:**
 ```bash

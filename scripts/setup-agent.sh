@@ -7,6 +7,13 @@
 #   AGENT_PORT=3001 AGENT_ID=vm-1 \
 #   bash setup-agent.sh
 #
+# Optional env vars:
+#   WAIT_MODE     What to do after successful health check:
+#                 - exit    (default): finish script
+#                 - logs    : follow agent.log
+#                 - journal : follow systemd journal (falls back to logs)
+#                 - wait    : keep process alive while agent is running
+#
 # What it does (idempotent):
 #   1. Installs Node.js (LTS) if missing.
 #   2. Installs git if missing.
@@ -28,6 +35,7 @@ AGENT_PORT="${AGENT_PORT:-3001}"
 AGENT_ID="${AGENT_ID:-$(hostname)}"
 NODE_MAJOR="${NODE_MAJOR:-20}"
 SERVICE_NAME="${SERVICE_NAME:-playwright-agent}"
+WAIT_MODE="${WAIT_MODE:-exit}"
 
 if [[ -z "$REPO_URL" && ! -d "$APP_DIR/.git" ]]; then
   echo "ERROR: REPO_URL env var is required on first run." >&2
@@ -180,7 +188,49 @@ for i in {1..15}; do
   if curl -fsS "http://127.0.0.1:${AGENT_PORT}/health" >/dev/null 2>&1; then
     log "Agent is healthy:"
     curl -s "http://127.0.0.1:${AGENT_PORT}/health"; echo
-    exit 0
+
+    case "$WAIT_MODE" in
+      exit)
+        exit 0
+        ;;
+      logs)
+        log "WAIT_MODE=logs: following $APP_DIR/agent.log (Ctrl+C to stop viewing; service keeps running)."
+        exec tail -f "$APP_DIR/agent.log"
+        ;;
+      journal)
+        if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
+          log "WAIT_MODE=journal: following journalctl -u $SERVICE_NAME (Ctrl+C to stop viewing; service keeps running)."
+          exec $SUDO journalctl -u "$SERVICE_NAME" -f
+        fi
+        log "WAIT_MODE=journal requested but systemd is unavailable; following $APP_DIR/agent.log instead."
+        exec tail -f "$APP_DIR/agent.log"
+        ;;
+      wait)
+        log "WAIT_MODE=wait: keeping setup script attached while agent is running (Ctrl+C to exit wait loop)."
+        if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
+          while true; do
+            if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
+              echo "ERROR: service '$SERVICE_NAME' is no longer active." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+        fi
+        if [[ -f "$APP_DIR/agent.pid" ]]; then
+          while kill -0 "$(cat "$APP_DIR/agent.pid")" 2>/dev/null; do
+            sleep 2
+          done
+          echo "ERROR: agent process is no longer running." >&2
+          exit 1
+        fi
+        echo "ERROR: WAIT_MODE=wait requires systemd service or nohup pid file to monitor." >&2
+        exit 1
+        ;;
+      *)
+        echo "ERROR: invalid WAIT_MODE '$WAIT_MODE'. Use one of: exit, logs, journal, wait." >&2
+        exit 1
+        ;;
+    esac
   fi
   sleep 1
 done
