@@ -1,9 +1,10 @@
 {
-  "searchQuery": "Playwright",
   "targetUrl": "https://www.google.com",
   "headless": true,
+  "ignoreHTTPSErrors": true,
   "reportFile": "reports/report.json",
-  "timeout": 90000,
+  "timeout": 300000,
+  "iterations": 1,
 
   "vms": [
     {

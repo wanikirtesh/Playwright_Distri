@@ -1,7 +1,6 @@
 {
-  "searchQuery": "Playwright",
-  "targetUrl": "http://mn4sg3xappl501.ideasstg.int/solutions/",
-  "headless": false,
+  "targetUrl": "https://www.google.com",
+  "headless": true,
   "ignoreHTTPSErrors": true,
   "reportFile": "reports/local-report.json",
   "timeout": 300000,

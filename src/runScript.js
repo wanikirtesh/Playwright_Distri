@@ -1,57 +1,38 @@
-async function runScript(page, config, result, browserId) {
-  const {
-    searchQuery = 'Playwright',
-    targetUrl = 'https://www.google.com'
-  } = config;
 
-  result.timings = result.timings || {};
+module.exports = {
+  test: async ({ step, sync, metric, page, config, result, browserId }) => {
+    const {
+      targetUrl = 'https://www.google.com'
+    } = config;
 
-  // Hook network telemetry — must be installed before navigation
-  trackNetwork(page, result);
+    // Navigate to URL
+    await step('navigation', () =>
+      page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    );
 
-  // ── Navigate to URL ──
-  await timed(result, 'navigation', () =>
-    page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
-    browserId
-  );
+    await sync('queryReady');
 
-	await barrier(result, 'queryReady', { config, browserId });
-  // ── Type in search box ──
-  await timed(result, 'typeDelay', async () => {
-    const searchSelector = await Promise.race([
-      page.waitForSelector('textarea[name="q"]', { timeout: 5000 }).then(() => 'textarea[name="q"]').catch(() => null),
-      page.waitForSelector('input[name="q"]',    { timeout: 5000 }).then(() => 'input[name="q"]').catch(() => null),
-      page.waitForSelector('[role="combobox"]',  { timeout: 5000 }).then(() => '[role="combobox"]').catch(() => null),
-    ].filter(Boolean));
-    const sel = searchSelector || 'input[name="q"]';
-    await page.fill(sel, searchQuery);
-  }, browserId);
+    // Type in search box
+    await step('typeDelay', async () => {
+      const searchSelector = await Promise.race([
+        page.waitForSelector('textarea[name="q"]', { timeout: 5000 }).then(() => 'textarea[name="q"]').catch(() => null),
+        page.waitForSelector('input[name="q"]',    { timeout: 5000 }).then(() => 'input[name="q"]').catch(() => null),
+        page.waitForSelector('[role="combobox"]',  { timeout: 5000 }).then(() => '[role="combobox"]').catch(() => null),
+      ].filter(Boolean));
+      const sel = searchSelector || 'input[name="q"]';
+      await page.fill(sel, "Playwright");
+    });
 
-  // ── Submit search ──
-  // Sync up across all browsers/VMs so the search submit hits Google at the
-  // same moment (fail-open: any laggard past the timeout is left behind).
-  await barrier(result, 'preSearch', { config, browserId });
-  await timed(result, 'searchResponse', async () => {
-    await page.keyboard.press('Enter');
-    await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-  }, browserId);
+    // Submit search in sync across all browsers/VMs.
+    await sync('preSearch');
+    await step('searchResponse', async () => {
+      await page.keyboard.press('Enter');
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+    });
 
-  // ── Wait for results ──
-  await timed(result, 'resultsRendered', () =>
-    page.waitForSelector('#search, #rso, .g', { timeout: 15000 }).catch(() => {}),
-    browserId
-  );
-
-  // ── Capture result count ──
-  result.resultStats = await page.$eval('#result-stats', el => el.innerText).catch(() => 'N/A');
-
-  // ── Capture top 3 result titles ──
-  result.topResults = await page.$$eval('h3', els =>
-    els.slice(0, 3).map(el => el.innerText.trim()).filter(Boolean)
-  ).catch(() => []);
-  setMetric(result, 'itemsScraped', result.topResults.length);
-
-  sumTimings(result, ['navigation', 'searchResponse', 'resultsRendered'], 'totalTime');
-}
-
-module.exports = runScript;
+    // Wait for results
+    await step('resultsRendered', () =>
+      page.waitForSelector('#search, #rso, .g', { timeout: 15000 }).catch(() => {})
+    );
+  },
+};

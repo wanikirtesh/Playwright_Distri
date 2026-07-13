@@ -178,8 +178,6 @@ node agent/agent.js --port=3001 --id=vm-office-1
 ### Edit config.json on your local machine:
 ```json
 {
-  "searchQuery": "Playwright",
-  "targetUrl": "https://www.google.com",
   "headless": true,
   "vms": [
     { "id": "local",      "host": "localhost",    "port": 3001, "browsers": 3 },
@@ -202,11 +200,15 @@ node coordinator/coordinator.js --config=config.json
 
 | Field         | Type    | Default               | Description                        |
 |---------------|---------|-----------------------|------------------------------------|
-| `searchQuery` | string  | `"Playwright"`        | What to search for on Google       |
-| `targetUrl`   | string  | `"https://www.google.com"` | URL to open                   |
 | `headless`    | boolean | `true`                | Run browsers headless              |
 | `reportFile`  | string  | `reports/report.json` | Where to save JSON report          |
 | `timeout`     | number  | `90000`               | Timeout per VM in ms               |
+| `scriptFile`  | string  | `src/runScript.js`    | Entry file that exports runScript  |
+| `moduleFiles` | array   | `[]`                  | Extra JS files bundled before entry |
+| `sharedConfigFile` | string | —                 | Path to one shared JSON for module params + test data distribution |
+| `sharedConfig` | object | —                    | Inline shared JSON object (alternative to `sharedConfigFile`) |
+| `enableAgentLogStream` | boolean | `true`        | Stream agent logs in real-time to coordinator console + file |
+| `agentLogFile` | string | `reports/agent-live-<ts>.log` | File path for streamed agent logs on coordinator machine |
 | `vms`         | array   | —                     | List of VM definitions             |
 
 ### VM object fields
@@ -235,9 +237,224 @@ node coordinator/coordinator.js \
   --vms="localhost:3001,192.168.1.10:3001,192.168.1.11:3001" \
   --browsers=3 \
   --query="Playwright"
+
+# Modular script bundle (helpers + modules + entry)
+node coordinator/coordinator.js \
+  --config=config.local.json \
+  --modules="src/modules/auth.js,src/modules/search.js,src/modules/assertions.js" \
+  --script="src/scenarios/googleScenario.js"
+
+# Shared config from a single JSON file
+node coordinator/coordinator.js \
+  --config=config.local.json \
+  --shared=shared-data.example.json
+
+# Disable live agent log streaming
+node coordinator/coordinator.js \
+  --config=config.local.json \
+  --agent-log-stream=false
+
+# Use a custom coordinator-side live agent log file
+node coordinator/coordinator.js \
+  --config=config.local.json \
+  --agent-log-file=reports/my-agent-live.log
 ```
 
 > Note: `--vms` inline applies the same `--browsers` count to all VMs. Use a config file for per-VM browser counts.
+
+### Script bundling order
+
+The coordinator now builds one runtime script in this order:
+
+1. `src/lib.js` (shared framework/helpers)
+2. each file from `moduleFiles` (or `--modules`) in the given order
+3. `scriptFile` (or `--script`) as the final entry file
+
+Only the entry file should set `module.exports = runScript`.
+
+Example config:
+
+```json
+{
+  "scriptFile": "src/scenarios/googleScenario.js",
+  "moduleFiles": [
+    "src/modules/auth.js",
+    "src/modules/search.js",
+    "src/modules/commonMetrics.js"
+  ]
+}
+```
+
+### Shared JSON Parameters And Data Distribution
+
+Use one JSON file to control:
+
+1. Global params applied to all modules
+2. Per-module overrides
+3. Distributed row-level data across all VMs, browsers, and iterations
+
+Example: `shared-data.example.json`
+
+```json
+{
+  "global": {
+    "targetUrl": "https://my-app.example.com"
+  },
+  "modules": {
+    "loginScript": {
+      "targetUrl": "https://my-app.example.com/login"
+    },
+    "businessAnalysis": {
+      "propertyId": "990001"
+    }
+  },
+  "distribution": {
+    "mode": "round-robin",
+    "onExhausted": "wrap"
+  },
+  "data": [
+    { "username": "user1", "password": "pass1", "propertyId": "990001" },
+    { "username": "user2", "password": "pass2", "propertyId": "990002" }
+  ]
+}
+```
+
+How values are resolved for each module execution:
+
+1. Base run config
+2. `sharedConfig.global` (or `sharedConfig.defaults`)
+3. `sharedConfig.modules.<moduleName>`
+4. Distributed row from `sharedConfig.data`
+
+The final layer wins, so row data can override module/global values.
+
+Distribution is deterministic by global virtual-user index:
+
+- `globalVuIndex = ((iteration - 1) * totalBrowsersPerIteration) + globalBrowserStart + localBrowserIndexZeroBased`
+
+Modes:
+
+- `round-robin` (default): uses `data[globalVuIndex % data.length]`
+- `iteration-block`: assigns contiguous blocks by iteration
+- `browser-sticky` (alias: `vm-browser-sticky`): pins each VM/browser slot to one row across all iterations
+
+Sticky mode details:
+
+- Row selection is based on browser slot, not iteration: `data[(vmGlobalStart + localBrowserIndexZeroBased)]` (then `onExhausted` policy applies)
+- This keeps the same VM + browser index on the same row for every iteration
+- Keep VM order and browser counts stable between runs if you need the same slot-to-row mapping across runs
+
+Sticky mode example:
+
+```json
+{
+  "distribution": {
+    "mode": "browser-sticky",
+    "onExhausted": "wrap"
+  }
+}
+```
+
+When data is exhausted:
+
+- `wrap` (default): cycle back to start
+- `skip`: no row injected
+- `error`: fail fast
+
+Each browser result now includes execution/distribution metadata (`executionContext` and `distribution`) so you can audit exactly which row each VU consumed.
+
+### Access Shared Data Inside Module Files
+
+You do not need any extra import. Each module already receives merged `config`.
+
+Example (`src/pages/loginScript.js` style):
+
+```js
+module.exports = {
+  test: async ({ step, metric, page, config, result, browserId }) => {
+    const {
+      targetUrl,
+      username,
+      password,
+      propertyId,
+      vu = {}
+    } = config;
+
+    // Optional: simple VU context (already prepared by coordinator)
+    console.log(`[${browserId}] iter=${vu.iteration} vm=${vu.vmId} row=${vu.dataIndex}`);
+
+    await step('navigation', () => page.goto(targetUrl, { waitUntil: 'domcontentloaded' }));
+    await step('fillUser', () => page.fill('input[type="email"]', username));
+    await step('fillPass', () => page.fill('input[type="password"]', password));
+
+    metric('hasPropertyId', propertyId ? 1 : 0);
+  },
+};
+```
+
+Available in `config` for each module run:
+
+- `targetUrl`, `username`, `password`, etc. (from merged shared JSON layers)
+- `vu`: simple browser context object
+- `vu.dataIndex`: selected row index from `data`
+- `vu.datasetSize`: total rows in dataset
+- `vu.distributionMode`: `round-robin`, `iteration-block`, or `browser-sticky`
+- `vu.dataExhausted`: true when `onExhausted=skip` and no row assigned
+- `vu.iteration`, `vu.vmId`, `vu.localBrowserIndex`, `vu.globalVuIndex`
+- `dataRow`: the full assigned input row (same values that were merged into `config`)
+
+Merge precedence reminder (later wins):
+
+1. Base run config
+2. `sharedConfig.global` (or `sharedConfig.defaults`)
+3. `sharedConfig.modules.<moduleName>`
+4. Assigned row in `sharedConfig.data`
+
+So if `data` row has `username`, it overrides `modules.loginScript.username` and `global.username`.
+
+### Module-Level Logging
+
+Module test functions can now consume `log` directly from the context object.
+
+```js
+module.exports = {
+  test: async ({ step, log, config, browserId }) => {
+    log.info('Starting login flow', { browserId, propertyId: config.propertyId });
+    await step('navigation', () => page.goto(config.baseUrl));
+    log.warn('Navigation completed with warning threshold', { ttfbMs: 850 });
+  },
+};
+```
+
+Supported methods:
+
+- `log(message, meta)` (same as `log.info`)
+- `log.debug(message, meta)`
+- `log.info(message, meta)`
+- `log.warn(message, meta)`
+- `log.error(message, meta)`
+
+Module logs are:
+
+- visible on agent console
+- written to agent local log file (`AGENT_LOG_FILE`)
+- streamed in real-time to coordinator when `enableAgentLogStream=true`
+- stored in result JSON under `browserResults[].moduleLogs`
+
+### Agent Logging Framework
+
+Agent now has level-based logging with local file and optional real-time streaming to coordinator.
+
+- Default local agent log file: `reports/agent.log` (on each agent VM)
+- Configure with env vars on agent VM:
+  - `AGENT_LOG_LEVEL` = `debug|info|warn|error`
+  - `AGENT_LOG_FILE` = custom local path
+- Real-time log streaming:
+  - Coordinator exposes `POST /agent-log` on barrier host/port
+  - Agent streams logs best-effort during active runs
+  - Coordinator prints `[AGENT-RT] ...` lines and appends to `agentLogFile`
+
+If log streaming cannot reach coordinator, agent execution continues (logging transport is fail-open).
 
 ---
 
