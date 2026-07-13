@@ -1,4 +1,4 @@
-# Playwright Distributed Performance Tester
+# Playwright LoadMesh
 
 Run real browser sessions concurrently across multiple VMs and measure response times end-to-end.
 
