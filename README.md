@@ -3,6 +3,8 @@
 Run real browser sessions concurrently across multiple VMs and measure response times end-to-end.
 
 ---
+![Playwright LoadMesh](./md/playwright-loadmesh.png) 
+---
 
 ## Architecture
 
